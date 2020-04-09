@@ -2,6 +2,7 @@
 import memoize from 'memoizerific';
 import dedent from 'ts-dedent';
 import stable from 'stable';
+import { pick } from 'lodash';
 
 import { Channel } from '@storybook/channels';
 import Events from '@storybook/core-events';
@@ -226,6 +227,18 @@ export default class StoryStore {
     this._parameterEnhancers.push(parameterEnhancer);
   }
 
+  // Combine the global, kind & story parameters of a story, running the parameter enhancer..
+  getAllParameters(storyId) {
+    const data = this._stories[storyId];
+    const kindMetadata: KindMetadata = this._kinds[data.kind];
+
+    return combineParameters(
+      this._globalMetadata.parameters,
+      kindMetadata.parameters,
+      data.parameters
+    );
+  }
+
   addStory(
     {
       id,
@@ -277,31 +290,11 @@ export default class StoryStore {
       ...kindMetadata.decorators,
       ...this._globalMetadata.decorators,
     ];
-    const parametersBeforeEnhancement = combineParameters(
-      this._globalMetadata.parameters,
-      kindMetadata.parameters,
-      storyParameters
-    );
 
-    const parameters = this._parameterEnhancers.reduce(
-      (accumlatedParameters, enhancer) => ({
-        ...accumlatedParameters,
-        ...enhancer({
-          ...identification,
-          parameters: accumlatedParameters,
-          args: {},
-          globalArgs: {},
-        }),
-      }),
-      parametersBeforeEnhancement
-    );
-
-    let finalStoryFn: LegacyStoryFn;
-    if (parameters.passArgsFirst) {
-      finalStoryFn = (context: StoryContext) => (original as ArgsStoryFn)(context.args, context);
-    } else {
-      finalStoryFn = original as LegacyStoryFn;
-    }
+    const finalStoryFn = (context: StoryContext) =>
+      context.parameters.passArgsFirst
+        ? (original as ArgsStoryFn)(context.args, context)
+        : original(context);
 
     // lazily decorate the story when it's loaded
     const getDecorated: () => LegacyStoryFn = memoize(1)(() =>
@@ -314,23 +307,39 @@ export default class StoryStore {
       getDecorated()({
         ...identification,
         ...runtimeContext,
-        parameters,
+        parameters: this.getFullParameters(id),
         hooks,
         args: _stories[id].args,
         globalArgs: this._globalArgs,
       });
 
+    // Let's treat these in a special way as we aren't going to keep them in parameters long term, we don't think
+    const argParametersBeforeEnhancement = combineParameters(
+      pick(this._globalMetadata.parameters, 'args', 'argTypes'),
+      pick(kindMetadata.parameters, 'args', 'argTypes'),
+      pick(storyParameters, 'args', 'argTypes')
+    );
+
+    const { args = {}, argTypes = {} } = this._parameterEnhancers.reduce(
+      (accumlatedParameters, enhancer) => ({
+        ...accumlatedParameters,
+        ...enhancer({
+          parameters: accumlatedParameters,
+          args: {},
+          globalArgs: {},
+        }),
+      }),
+      argParametersBeforeEnhancement
+    );
+
     // Pull out parameters.args.$ || .argTypes.$.defaultValue into initialArgs
-    const initialArgs: Args = parameters.args || {};
-    const defaultArgs: Args = parameters.argTypes
-      ? Object.entries(parameters.argTypes as Record<string, { defaultValue: any }>).reduce(
-          (acc, [arg, { defaultValue }]) => {
-            if (defaultValue) acc[arg] = defaultValue;
-            return acc;
-          },
-          {} as Args
-        )
-      : {};
+    const initialArgs: Args = args;
+    const defaultArgs: Args = Object.entries(
+      argTypes as Record<string, { defaultValue: any }>
+    ).reduce((acc, [arg, { defaultValue }]) => {
+      if (defaultValue) acc[arg] = defaultValue;
+      return acc;
+    }, {} as Args);
 
     _stories[id] = {
       ...identification,
@@ -340,7 +349,7 @@ export default class StoryStore {
       getOriginal,
       storyFn,
 
-      parameters,
+      parameters: storyParameters,
       args: { ...defaultArgs, ...initialArgs },
     };
   }
